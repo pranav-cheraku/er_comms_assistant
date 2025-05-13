@@ -17,3 +17,5 @@ pnpm-debug.log*
 # Node modules
 node_modules/
 
+# virtual environments
+.ER_venv
