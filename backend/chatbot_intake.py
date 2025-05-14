@@ -5,20 +5,21 @@
 # Pretrained model pipeline:
 # T5 pre-trained transformer to perform abstractive summarization
 # MedSpaCy to perform Named Entity Recognition
-
-import torch
-import medspacy
-
-from transformers import T5Tokenizer, T5ForConditionalGeneration
+import scispacy
+import spacy
 
 def NER():
-    nlp = medspacy.load()
-    sample_text = "The patient denies chest pain but has a history of hypertension."
-    # need a way to compile all user text into one conversation string
-    doc = nlp(sample_text)
+    nlp = spacy.load("en_core_sci_md")
+    text = """
+    Myeloid derived suppressor cells (MDSC) are immature 
+    myeloid cells with immunosuppressive activity. 
+    They accumulate in tumor-bearing mice and humans 
+    with different types of cancer, including hepatocellular 
+    carcinoma (HCC).
+    """
+    doc = nlp(text)
 
-    for ent in doc.ents:
-        print(ent.text, ent.label_)
+    print(list(doc.sents))
 
 def summarize():
     ner = NER()
