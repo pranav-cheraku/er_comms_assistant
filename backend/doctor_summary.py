@@ -22,10 +22,8 @@ def transcribe_audio(audio_path):
     return result["text"]
 
 # Use the full path to the audio file
-current_dir = os.path.dirname(os.path.abspath(__file__))
-audio_file = os.path.join(current_dir, "test.mp3")
-transcription = transcribe_audio(audio_file)
-print(transcription)
+
+
 
 # Load the MedSpaCy model
 def load_scispacy():
@@ -51,13 +49,16 @@ def summarize(text, tokenizer, model):
     input_ids = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True).input_ids
 
     # Generate summary
-    summary_ids = model.generate(input_ids, max_length=5000, num_beams=5, length_penalty=0.7, early_stopping=True)
+    summary_ids = model.generate(input_ids, max_length=500, num_beams=5, length_penalty=1.2, early_stopping=True)
     summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
 
     print(summary)
 
 def main():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    audio_file = os.path.join(current_dir, "test.mp3")
     transcription = transcribe_audio(audio_file)
+    
     nlp = load_scispacy()
     tokenizer, model = load_t5()
     NER(transcription, nlp)
