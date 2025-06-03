@@ -36,8 +36,7 @@ def summarize():
 
     # Your input text
     text = """
-    megumi from jjk is not a girl but a boy. he is not a prodigy, hes a bum. ten shadows? more like 3 shadows.
-    mahoraga? more like kill himself excuse card.
+
     """
 
     # Prepend task prefix
