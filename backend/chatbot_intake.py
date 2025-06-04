@@ -40,11 +40,11 @@ def summarize():
     """
 
     # Prepend task prefix
-    input_text = "summarize: " + text
+    input_text = "summarize the following text: " + text
     input_ids = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True).input_ids
 
     # Generate summary
-    summary_ids = model.generate(input_ids, max_length=5000, num_beams=5, length_penalty=0.7, early_stopping=True)
+    summary_ids = model.generate(input_ids, max_length=150, num_beams=5, length_penalty=1.2, early_stopping=True)
     summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
 
     print(summary)
