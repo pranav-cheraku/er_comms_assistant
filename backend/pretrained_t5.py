@@ -1,271 +1,156 @@
-import pandas as pd
+import torch
 from transformers import T5Tokenizer, T5ForConditionalGeneration
+import os
+import pandas as pd
+import random
+from rouge_score import rouge_scorer
+from torch.utils.data import DataLoader, Dataset
+from typing import Dict, List
 from datasets import load_dataset
-from rouge_score import rouge_scorer, scoring
-import numpy as np
 from tqdm import tqdm
 
-print("Importing dataset...")
-ds = load_dataset("AGBonnet/augmented-clinical-notes")
+class MedicalDataset(Dataset):
+    def __init__(self, conversations: List[str], tokenizer: T5Tokenizer, max_length: int = 512):
+        self.conversations = conversations
+        self.tokenizer = tokenizer
+        self.max_length = max_length
 
-# testing t5 out of the box
+    def __len__(self):
+        return len(self.conversations)
+    
+    def __getitem__(self, idx):
+        conversation = self.conversations[idx]
 
-def import_baseline_t5():
-    tokenizer = T5Tokenizer.from_pretrained("t5-small")
-    model = T5ForConditionalGeneration.from_pretrained("t5-small")
-    return tokenizer, model
+        # Add sumarize task prefix for T5
+        input_text = f"summarize: {conversation}"
 
-def summarize_baseline_t5(text, tokenizer, model):
-    input_ids = tokenizer.encode(text, return_tensors="pt")
-    summary_ids = model.generate(
-        input_ids,
-        max_length=200,         
-        min_length=50,           
-        num_beams=5,             
-        length_penalty=1.2,      
-        early_stopping=True,
-        no_repeat_ngram_size=3,  
-        temperature=0.7,         
-        top_k=50,             
-        top_p=0.95,             
-        do_sample=True,         
-        repetition_penalty=1.2   
+        # Tokenize inputs
+        inputs = self.tokenizer(
+            input_text,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+
+        # return input id's and attention mask for each item dataloader pulls
+        return {
+            'input_ids': inputs['input_ids'].squeeze(),
+            'attention_mask': inputs['attention_mask'].squeeze(),
+        }
+
+def load_test_data(tokenizer, batch_size=8):
+    """Load test set and create a random subset of 200 samples"""
+    print("Loading dataset...")
+    dataset = load_dataset("AGBonnet/augmented-clinical-notes")
+    
+    # extract conversations and summries from dataset
+    conversations = dataset["train"]["conversation"]
+    summaries = dataset["train"]["summary"]
+    
+    # calculate split indices for 80/10/10 split
+    total_size = len(conversations)
+    train_size = int(total_size * 0.8)
+    val_size = int(total_size * 0.1)
+    
+    # isolate test set
+    test_conversations = conversations[train_size+val_size:]
+    test_summaries = summaries[train_size+val_size:]
+    
+    # Select random subset of 200 samples
+    random.seed(42)  # For reproducibility
+    indices = random.sample(range(len(test_conversations)), 200)
+    
+    test_subset_conversations = [test_conversations[i] for i in indices]
+    test_subset_summaries = [test_summaries[i] for i in indices]
+    
+    # create dataset and dataloader
+    test_dataset = MedicalDataset(
+        conversations=test_subset_conversations,
+        tokenizer=tokenizer
     )
-    summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-    return summary
+    
+    test_loader = DataLoader(test_dataset, batch_size=batch_size)
+    
+    return test_loader, test_subset_conversations, test_subset_summaries
 
-# prompt engineering
-def summarize_PE_t5(text, tokenizer, model):
-    prompt = """
-    You are a medical assistant. You are given a conversation between a doctor and a patient.
-    Summarize the following conversation in your own words:
 
-    IMPORTANT:
-    Return your summary in the following format. Fill empty fields with the word 'None'.
-    {
-        "visit motivation": "",
-        "admission": [
-        {
-        "reason": "",
-        "date": "",
-        "duration": "",
-        "care center details": ""
-        }
-        ],
-        "patient information": {
-        "age": "",
-        "sex": "",
-        "ethnicity": "",
-        "weight": "",
-        "height": "",
-        "family medical history": "",
-        "recent travels": "",
-        "socio economic context": "",
-        "occupation": ""
-        },
-        "patient medical history": {
-        "physiological context": "",
-        "psychological context": "",
-        "vaccination history": "",
-        "allergies": "",
-        "exercise frequency": "",
-        "nutrition": "",
-        "sexual history": "",
-        "alcohol consumption": "",
-        "drug usage": "",
-        "smoking status": ""
-        },
-        "surgeries": [
-        {
-        "reason": "",
-        "Type": "",
-        "time": "",
-        "outcome": "",
-        "details": ""
-        }
-        ],
-        "symptoms": [
-        {
-        "name of symptom": "",
-        "intensity of symptom": "",
-        "location": "",
-        "time": "",
-        "temporalisation": "",
-        "behaviours affecting the symptom": "",
-        "details": ""
-        }
-        ],
-        "medical examinations": [
-        {
-        "name": "",
-        "result": "",
-        "details": ""
-        },
-        {
-        "name": "",
-        "result": "",
-        "details": ""
-        }
-        ],
-        "diagnosis tests": [
-        {
-        "test": "",
-        "severity": "",
-        "result": "",
-        "condition": "",
-        "time": "",
-        "details": ""
-        }
-        ],
-        "treatments": [
-        {
-        "name": "",
-        "related condition": "",
-        "dosage": "",
-        "time": "",
-        "frequency": "",
-        "duration": "",
-        "reason for taking": "",
-        "reaction to treatment": "",
-        "details": ""
-        }
-        ],
-        "discharge": {
-        "reason": "",
-        "referral": "",
-        "follow up": "",
-        "discharge summary": ""
-        }
-    }
-    """
-    prompt += text
-    input_ids = tokenizer.encode(prompt, return_tensors="pt")
-    summary_ids = model.generate(
-        input_ids,
-        max_length=500,          # Increased for structured output
-        min_length=100,          # Ensure sufficient detail
-        num_beams=5,             # Increased beam size
-        length_penalty=1.5,      # Favor longer, more detailed outputs
-        early_stopping=True,
-        no_repeat_ngram_size=3,  # Prevent repetition
-        temperature=0.6,         # Lower temperature for more focused output
-        top_k=40,               # More focused token selection
-        top_p=0.9,              # Nucleus sampling
-        do_sample=True,         # Enable sampling
-        repetition_penalty=1.3,  # Stronger repetition penalty
-        num_return_sequences=1   # Return only the best sequence
-    )
-    summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-    return summary
-
-def calculate_corpus_rouge(predictions, references):
-    """Calculate corpus-level ROUGE scores"""
+def calculate_rouge_scores(predictions: List[str], references: List[str]) -> Dict[str, float]:
+    """Calculate ROUGE scores for generated summaries"""
     scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
-    aggregator = scoring.BootstrapAggregator()
-
+    scores = {
+        'rouge1': [],
+        'rouge2': [],
+        'rougeL': []
+    }
+    
+    # calculate rouge score for each pair of predictions and ground-truth labels
     for pred, ref in zip(predictions, references):
-        scores = scorer.score(ref, pred)  # reference first, prediction second
-        aggregator.add_scores(scores)
+        score = scorer.score(ref, pred)
+        scores['rouge1'].append(score['rouge1'].fmeasure)
+        scores['rouge2'].append(score['rouge2'].fmeasure)
+        scores['rougeL'].append(score['rougeL'].fmeasure)
+    
+    # calculate averages for all three types of rouges scores
+    return {
+        'rouge1_f1': sum(scores['rouge1']) / len(scores['rouge1']),
+        'rouge2_f1': sum(scores['rouge2']) / len(scores['rouge2']),
+        'rougeL_f1': sum(scores['rougeL']) / len(scores['rougeL'])
+    }
 
-    result = aggregator.aggregate()
+def main():
+    # load model and tokenizer
+    model = T5ForConditionalGeneration.from_pretrained('t5-base')
+    tokenizer = T5Tokenizer.from_pretrained('t5-base')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Extract precision, recall, f1 for each metric
-    rouge_scores = {}
-    for metric in ['rouge1', 'rouge2', 'rougeL']:
-        # Access the score object's low, mid, and high values
-        rouge_scores[f'{metric}_precision'] = result[metric].mid.precision
-        rouge_scores[f'{metric}_recall'] = result[metric].mid.recall
-        rouge_scores[f'{metric}_f1'] = result[metric].mid.fmeasure
+    # load test data and get random subset
+    test_loader, test_subset_conversations, test_subset_summaries = load_test_data(tokenizer)
+    
+    # generate summaries and collect references
+    all_predictions = []
+    
+    print("\nGenerating summaries for 200 random test samples...")
+    for batch in tqdm(test_loader, desc="Testing", total=len(test_loader)):
+        # move batch to device
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        
+        # generate summaries
+        outputs = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_length=512,
+            num_beams=4,
+            length_penalty=2.0,
+            early_stopping=True
+        )
+        
+        # decode predictions
+        predictions = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-    return rouge_scores
-
-
-def evaluate_baseline_t5():
-    print("Loading T5 model and tokenizer...")
-    tokenizer, model = import_baseline_t5()
+        # add current predicted sequence to final master list of predictions
+        all_predictions.extend(predictions)
     
-    # Get a subset of the dataset for evaluation
-    eval_size = 500  # Adjust this number based on your needs
-    permutation = np.random.permutation(len(ds["train"]))
-    conversations = [ds["train"]["conversation"][i] for i in permutation[:eval_size]]
-    ground_truth_summaries = [ds["train"]["summary"][i] for i in permutation[:eval_size]]
+    # calculate ROUGE scores
+    all_references = test_subset_summaries
+    rouge_scores = calculate_rouge_scores(all_predictions, all_references)
+    print("\nTest Set ROUGE Scores:")
+    for metric, score in rouge_scores.items():
+        print(f"{metric}: {score:.4f}")
     
-    print(f"\nEvaluating on {eval_size} samples...")
-    generated_summaries = []
-    
-    # Generate summaries
-    for conv in tqdm(conversations, desc="Generating summaries"):
-        summary = summarize_PE_t5(conv, tokenizer, model)
-        generated_summaries.append(summary)
-    
-    # Calculate metrics
-    print("\nCalculating metrics...")
-    metrics = calculate_corpus_rouge(generated_summaries, ground_truth_summaries)
-    
-    # Print results
-    print("\nEvaluation Results:")
-    print("=" * 50)
-    for metric, value in metrics.items():
-        print(f"{metric}: {value:.4f}")
-    
-    # Print some examples
+    # Show 3 random examples
     print("\nExample Summaries:")
-    print("=" * 50)
-    for i in range(3):  # Show first 3 examples
-        print(f"\nExample {i+1}:")
-        print("Original Conversation:")
-        print(conversations[i][:200] + "...")  # Show first 200 chars
+    example_indices = random.sample(range(len(test_subset_conversations)), 3)
+    for idx in example_indices:
+        print("\n" + "="*80)
+        print("Conversation:")
+        print(test_subset_conversations[idx])
         print("\nGenerated Summary:")
-        print(generated_summaries[i])
-        print("\nGround Truth Summary:")
-        print(ground_truth_summaries[i])
-        print("-" * 50)
-    
-    return metrics
+        print(all_predictions[idx])
+        print("\nReference Summary:")
+        print(all_references[idx])
+        print("="*80)
 
-
-def evaluate_PE_t5():
-    print("Loading T5 model and tokenizer...")
-    tokenizer, model = import_baseline_t5()
-    
-    # Get a subset of the dataset for evaluation
-    eval_size = 100 
-    
-    conversations = ds["train"]["conversation"][:eval_size]
-    ground_truth_summaries = ds["train"]["summary"][:eval_size]
-
-    print(f"\nEvaluating on {eval_size} samples...")
-    generated_summaries = []
-    
-    # Generate summaries
-    for conv in tqdm(conversations, desc="Generating summaries"):
-        summary = summarize_PE_t5(conv, tokenizer, model)
-        generated_summaries.append(summary)
-    
-    # Calculate metrics
-    print("\nCalculating metrics...")
-    metrics = calculate_corpus_rouge(generated_summaries, ground_truth_summaries)
-    
-    # Print results
-    print("\nEvaluation Results:")
-    print("=" * 50)
-    for metric, value in metrics.items():
-        print(f"{metric}: {value:.4f}")
-    
-    # Print some examples
-    print("\nExample Summaries:")
-    print("=" * 50)
-    for i in range(3):  # Show first 3 examples
-        print(f"\nExample {i+1}:")
-        print("Original Conversation:")
-        print(conversations[i][:200] + "...")  # Show first 200 chars
-        print("\nGenerated Summary:")
-        print(generated_summaries[i])
-        print("\nGround Truth Summary:")
-        print(ground_truth_summaries[i])
-        print("-" * 50)
-    
-    return metrics
 if __name__ == "__main__":
-    evaluate_PE_t5()
-   
+    main()
