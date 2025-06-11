@@ -8,7 +8,6 @@ import numpy as np
 from tqdm import tqdm
 import os
 from typing import Dict, List, Tuple
-import json
 
 class MedicalDataset(Dataset):
     def __init__(self, conversations: List[str], summaries: List[str], tokenizer: T5Tokenizer, max_length: int = 512):
@@ -24,10 +23,10 @@ class MedicalDataset(Dataset):
         conversation = self.conversations[idx]
         summary = self.summaries[idx]
 
-        # Add task prefix for T5
+        # add task prefix for T5
         input_text = f"summarize: {conversation}"
 
-        # Tokenize inputs
+        # tokenize inputs
         inputs = self.tokenizer(
             input_text,
             max_length=self.max_length,
@@ -36,7 +35,8 @@ class MedicalDataset(Dataset):
             return_tensors='pt'
         )
 
-        # Tokenize targets
+        # tokenize targets -- This is required to calculate loss during training
+        # and serves as decoder input
         targets = self.tokenizer(
             summary,
             max_length=self.max_length,
@@ -45,7 +45,7 @@ class MedicalDataset(Dataset):
             return_tensors='pt'
         )
 
-        # Replace padding token ids in labels with -100 (ignored in loss calculation)
+        # replace padding token ids in labels with -100 to ignore during loss calculation
         labels = targets['input_ids'].squeeze().clone()
         labels[labels == self.tokenizer.pad_token_id] = -100
 
@@ -94,43 +94,39 @@ def train_epoch(model: T5ForConditionalGeneration,
                 train_loader: DataLoader, 
                 optimizer: torch.optim.Optimizer,
                 scheduler: torch.optim.lr_scheduler.LRScheduler,
-                device: torch.device,
-                gradient_accumulation_steps: int = 4) -> float:
+                device: torch.device) -> float:
     """Train for one epoch"""
     model.train()
     total_loss = 0
     
     progress_bar = tqdm(train_loader, desc="Training")
-    for step, batch in enumerate(progress_bar):
-        # Move batch to device
+    for batch in progress_bar:
+        # move batch to device
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
         
-        # Forward pass - T5 handles decoder attention internally
+        # forward pass - generates a probability distribution for the next word in the sequence
+        # T5 internally handles decoder lower triangular mask
         outputs = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels
         )
         
-        loss = outputs.loss / gradient_accumulation_steps
-        total_loss += loss.item() * gradient_accumulation_steps
+        loss = outputs.loss
+        total_loss += loss.item()
         
         # Backward pass
         loss.backward()
         
-        # Gradient accumulation
-        if (step + 1) % gradient_accumulation_steps == 0:
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+        # Update weights
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad()
         
         # Update progress bar
-        progress_bar.set_postfix({'loss': loss.item() * gradient_accumulation_steps})
+        progress_bar.set_postfix({'loss': loss.item()})
     
     return total_loss / len(train_loader)
 
@@ -146,12 +142,13 @@ def evaluate(model: T5ForConditionalGeneration,
     
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Evaluating"):
-            # Move batch to device
+            # move batch to device
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
             
-            # Forward pass for loss calculation
+            # forward pass for loss calculation -- loss here acts as a secondary evaluation metric
+            # not for training purposes
             outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -160,22 +157,22 @@ def evaluate(model: T5ForConditionalGeneration,
             
             total_loss += outputs.loss.item()
             
-            # Generate summaries
+            # generate summaries
             generated_ids = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_length=256,
-                min_length=30,
+                max_length=512,
+                min_length=50,
                 num_beams=4,
                 length_penalty=2.0,
                 early_stopping=True,
-                do_sample=False
             )
             
-            # Decode predictions and references
+            # decode predictions and references
             predictions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
             
-            # Convert labels back for decoding (replace -100 with pad_token_id)
+            # convert labels back for decoding
+            # replace -100 with pad_token_id
             labels_for_decode = labels.clone()
             labels_for_decode[labels_for_decode == -100] = tokenizer.pad_token_id
             references = tokenizer.batch_decode(labels_for_decode, skip_special_tokens=True)
@@ -219,8 +216,6 @@ def save_checkpoint(model: T5ForConditionalGeneration,
     checkpoint = {
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'epoch': epoch,
-        'metrics': metrics
     }
     torch.save(checkpoint, path)
     
@@ -233,43 +228,42 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Initialize model and tokenizer
+    # tnitialize model and tokenizer
     model_name = "t5-base"
     tokenizer = T5Tokenizer.from_pretrained(model_name)
     model = T5ForConditionalGeneration.from_pretrained(model_name)
     model.to(device)
     
-    # Training parameters
+    # training hyper parameters
     batch_size = 8  
-    num_epochs = 1
+    num_epochs = 5
     learning_rate = 3e-4  
     warmup_steps = 500
-    gradient_accumulation_steps = 4 
     
-    # Load data
+    # load data
     train_loader, val_loader = load_data(tokenizer, batch_size)
     
-    # Initialize optimizer and scheduler
+    # initialize optimizer and scheduler
     optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
-    total_steps = len(train_loader) * num_epochs // gradient_accumulation_steps
+    total_steps = len(train_loader) * num_epochs
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
         num_training_steps=total_steps
     )
     
-    # Training loop
+    # training loop
     best_rouge = 0
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch + 1}/{num_epochs}")
         
         # Train
         train_loss = train_epoch(
-            model, train_loader, optimizer, scheduler, device, gradient_accumulation_steps
+            model, train_loader, optimizer, scheduler, device
         )
         print(f"Training Loss: {train_loss:.4f}")
         
-        # Evaluate
+        # evaluate
         metrics = evaluate(model, val_loader, tokenizer, device)
         print("\nValidation Metrics:")
         for metric, value in metrics.items():
@@ -288,15 +282,6 @@ def main():
             )
             print(f"New best model saved! ROUGE-L: {best_rouge:.4f}")
         
-        # Save regular checkpoint
-        save_checkpoint(
-            model,
-            tokenizer,
-            optimizer,
-            epoch,
-            metrics,
-            f'checkpoints/checkpoint_epoch_{epoch + 1}.pt'
-        )
 
 if __name__ == "__main__":
     # Create checkpoints directory

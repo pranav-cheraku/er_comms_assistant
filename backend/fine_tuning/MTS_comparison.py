@@ -23,6 +23,7 @@ class MedicalData:
         conversation = self.conversations[idx]
         summary = self.summaries[idx]
 
+        # tokenize conversations
         tok_conv = self.tokenizer(
             conversation,
             max_length=self.maxlen,
@@ -31,6 +32,7 @@ class MedicalData:
             return_tensors='pt',
         )
 
+        # tokenize summarize for use in training
         tok_sum = self.tokenizer(
             summary,
             max_length=self.maxlen,
@@ -39,6 +41,7 @@ class MedicalData:
             return_tensors='pt'
         )
 
+        # change label of padding token to -100 to omit during loss calculation
         labels = tok_sum['input_ids'].squeeze().clone()
         labels[labels == self.tokenizer.pad_token_id] = -100
 
@@ -55,7 +58,7 @@ class MTST5:
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         
-        # Initialize model and tokenizer
+        # initialize model and tokenizer
         self.tokenizer = T5Tokenizer.from_pretrained(model_name)
         self.model = T5ForConditionalGeneration.from_pretrained(model_name)
         self.model.to(self.device)
@@ -65,7 +68,7 @@ class MTST5:
         train = pd.read_csv("../data/MTS-Dialog-TrainingSet.csv")
         dev = pd.read_csv("../data/MTS-Dialog-ValidationSet.csv")
         
-        # Create datasets
+        # create datasets
         train_dataset = MedicalData(
             conversations=train['dialogue'].tolist(),
             summaries=train['section_text'].tolist(),
@@ -78,7 +81,7 @@ class MTST5:
             tokenizer=self.tokenizer
         )
         
-        # Create dataloaders
+        # create dataloaders
         train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
         dev_loader = DataLoader(dev_dataset, batch_size=self.batch_size)
         
@@ -110,12 +113,12 @@ class MTST5:
         
         with torch.no_grad():
             for batch in tqdm(dev_loader, desc="Evaluating"):
-                # Move batch to device
+                # move batch to device
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device)
                 labels = batch['labels'].to(self.device)
                 
-                # Forward pass
+                # forward pass
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -124,7 +127,7 @@ class MTST5:
                 
                 total_loss += outputs.loss.item()
                 
-                # Generate summaries
+                # generate summaries
                 generated_ids = self.model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -134,9 +137,10 @@ class MTST5:
                     early_stopping=True
                 )
                 
-                # Decode predictions and references
+                # decode predictions and references
                 predictions = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-                # Fix: Need to replace -100 with pad_token_id for proper decoding
+
+                # replace -100 with pad_token_id for proper decoding
                 labels_for_decode = labels.clone()
                 labels_for_decode[labels_for_decode == -100] = self.tokenizer.pad_token_id
                 references = self.tokenizer.batch_decode(labels_for_decode, skip_special_tokens=True)
@@ -156,7 +160,7 @@ class MTST5:
         """Train the model"""
         train_loader, dev_loader = self.load_data()
         
-        # Initialize optimizer and scheduler
+        # initialize optimizer and scheduler
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate)
         total_steps = len(train_loader) * num_epochs
         scheduler = get_linear_schedule_with_warmup(
@@ -165,25 +169,25 @@ class MTST5:
             num_training_steps=total_steps
         )
         
-        # Training loop
-        best_rouge_l = 0  # Fix: Initialize best_rouge_l
-        half_epoch_steps = len(train_loader) // 2  # Calculate half epoch steps
+        # training loop
+        best_rouge_l = 0
+        half_epoch_steps = len(train_loader) // 2  # evaluate on dev every half epoch
         
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch + 1}/{num_epochs}")
             
-            # Training
+            # training mode -- allows weights to update
             self.model.train()
             total_loss = 0
             
             progress_bar = tqdm(train_loader, desc="Training")
             for step, batch in enumerate(progress_bar):
-                # Move batch to device
+                # move batch to device
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device)
                 labels = batch['labels'].to(self.device)
                 
-                # Forward pass
+                # forward pass
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -193,43 +197,46 @@ class MTST5:
                 loss = outputs.loss
                 total_loss += loss.item()
                 
-                # Backward pass
+                # backward pass -- updates parameters via gradient descent
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
                 
-                # Update progress bar
+                # update progress bar
                 progress_bar.set_postfix({'loss': loss.item()})
                 
-                # Evaluate every half epoch
+                # evaluate every half epoch
                 if (step + 1) % half_epoch_steps == 0:
+                    # switch to evaluation mode for validation
+                    # all models weights are frozen
+                    self.model.evaluate()
                     print(f"\nMid-epoch evaluation at step {step + 1}/{len(train_loader)}")
                     metrics = self.evaluate(dev_loader)
                     print("Validation Metrics:")
                     for metric, value in metrics.items():
                         print(f"{metric}: {value:.4f}")
                     
-                    # Save best model based on ROUGE-L
+                    # save best model based on ROUGE-L
                     if metrics['rougeL_f1'] > best_rouge_l:
                         best_rouge_l = metrics['rougeL_f1']
                         self.save_model(f"best_model_epoch_{epoch+1}_step_{step+1}.pt")
                         print(f"New best model saved with ROUGE-L: {best_rouge_l:.4f}")
                     
-                    # Return to training mode
+                    # return to training mode
                     self.model.train()
             
             avg_train_loss = total_loss / len(train_loader)
             print(f"Training Loss: {avg_train_loss:.4f}")
             
-            # End of epoch evaluation
+            # end of epoch evaluation
             print(f"\nEnd of epoch {epoch + 1} evaluation")
             metrics = self.evaluate(dev_loader)
             print("Validation Metrics:")
             for metric, value in metrics.items():
                 print(f"{metric}: {value:.4f}")
             
-            # Save best model based on ROUGE-L
+            # save best model based on ROUGE-L
             if metrics['rougeL_f1'] > best_rouge_l:
                 best_rouge_l = metrics['rougeL_f1']
                 self.save_model(f"best_model_epoch_{epoch+1}_final.pt")
@@ -240,7 +247,7 @@ class MTST5:
         os.makedirs('../MTS_checkpoints', exist_ok=True)
         checkpoint = {
             'model_state_dict': self.model.state_dict(),
-            'tokenizer_name': self.model_name,  # Store model name instead of tokenizer object
+            'tokenizer_name': self.model_name,
             'rouge_l_score': getattr(self, 'best_rouge_l', 0)
         }
         filepath = os.path.join('..', 'MTS_checkpoints', filename)
@@ -254,9 +261,9 @@ class MTST5:
 
 
 if __name__ == "__main__":
-    # Create checkpoints directory
+    # create checkpoints directory
     os.makedirs('../MTS_checkpoints', exist_ok=True)
     
-    # Initialize and train model
+    # initialize and train model
     model = MTST5(model_name="t5-base", batch_size=8)
     model.train(num_epochs=5)
